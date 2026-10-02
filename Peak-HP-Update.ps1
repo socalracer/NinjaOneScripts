@@ -552,6 +552,7 @@ function Get-InstalledHpiaVersion {
     if (-not (Test-Path -LiteralPath $ExePath)) { return $null }
     $vi = (Get-Item -LiteralPath $ExePath).VersionInfo
     $text = if ($vi.ProductVersion) { $vi.ProductVersion } else { $vi.FileVersion }
+    $text = ([string]$text -split '\+')[0].Trim()   # drop build metadata, e.g. 5.3.7.802+b3f210ad...
     return [pscustomobject]@{ Text = $text; Version = (ConvertTo-LooseVersion $text) }
 }
 
@@ -1057,6 +1058,11 @@ function Invoke-Main {
             Write-Output ''
             Write-Output 'Available (not installed - scan only):'
             if ($toInstall.Count -eq 0) { Write-Output 'None' } else { foreach ($x in $toInstall) { Write-Output ("{0} [{1}/{2}]" -f (& $fmt $x), $x.Category, $x.Value) } }
+            if (-not $s.IncludeOptional -and $routine.Count -gt 0) {
+                Write-Output ''
+                Write-Output 'Optional (Routine) - not installed unless Include Optional is ticked:'
+                foreach ($x in $routine) { Write-Output ("{0} [{1}]" -f (& $fmt $x), $x.Category) }
+            }
         } else {
             Write-Output ''
             Write-Output 'Installed:'
