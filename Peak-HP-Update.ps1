@@ -321,17 +321,27 @@ function Read-HpiaReport {
             foreach ($group in $groups) {
                 $category = ConvertTo-CategoryName $group.LocalName
                 foreach ($rec in $group.SelectNodes("*[local-name()='Recommendation']")) {
-                    $id = ConvertTo-SoftPaqId (Get-XmlText $rec 'Solution/Softpaq/Id')
+                    $rawId = Get-XmlText $rec 'Solution/Softpaq/Id'
+                    if (-not $rawId) { $rawId = Get-XmlText $rec 'SoftPaqNumber' }
+                    if (-not $rawId -and $rec.Attributes -and $rec.Attributes['SoftPaqNumber']) { $rawId = $rec.Attributes['SoftPaqNumber'].Value }
+                    $id = ConvertTo-SoftPaqId $rawId
                     if (-not $id) { continue }
                     $name = Get-XmlText $rec 'Solution/Softpaq/Name'
                     if (-not $name) { $name = Get-XmlText $rec 'TargetComponent' }
-                    $value = Get-XmlText $rec 'RecommendationValue'
-                    if (-not $value -and $rec.Attributes -and $rec.Attributes['RecommendationValue']) { $value = $rec.Attributes['RecommendationValue'].Value }
+                    # First field that maps to Critical/Recommended/Routine wins (see the JSON section below).
+                    $value = 'Unknown'
+                    foreach ($field in 'Severity', 'RecommendationValue', 'Comments') {
+                        $raw = Get-XmlText $rec $field
+                        if (-not $raw -and $rec.Attributes -and $rec.Attributes[$field]) { $raw = $rec.Attributes[$field].Value }
+                        if ($field -eq 'Comments' -and $raw -notmatch '^(?i)HP_(INSTALL|UPDATE)_') { continue }
+                        $value = ConvertTo-RecommendationValue $raw
+                        if ($value -ne 'Unknown') { break }
+                    }
                     $items[$id] = [pscustomobject]@{
                         Id                = $id
                         Name              = $name
                         Category          = $category
-                        Value             = ConvertTo-RecommendationValue $value
+                        Value             = $value
                         CurrentVersion    = Get-XmlText $rec 'TargetVersion'
                         AvailableVersion  = Get-XmlText $rec 'ReferenceVersion'
                         Status            = $null
@@ -362,7 +372,16 @@ function Read-HpiaReport {
                 $rem = Get-Prop $rec @('Remediation')
                 $existing = $null
                 if ($items.Contains($id)) { $existing = $items[$id] }
-                $value = ConvertTo-RecommendationValue ([string](Get-Prop $rec @('RecommendationValue', 'Recommendation')))
+                # HPIA reports the release type in Severity (e.g. RELEASE_TYPE_CRITICAL). RecommendationValue and
+                # Comments (e.g. HP_UPDATE_RECOMMENDED) are fallbacks. A field holding something else (e.g. a
+                # version string) maps to 'Unknown' and is skipped.
+                $value = 'Unknown'
+                foreach ($field in 'Severity', 'RecommendationValue', 'Recommendation', 'Comments') {
+                    $raw = [string](Get-Prop $rec @($field))
+                    if ($field -eq 'Comments' -and $raw -notmatch '^(?i)HP_(INSTALL|UPDATE)_') { continue }
+                    $value = ConvertTo-RecommendationValue $raw
+                    if ($value -ne 'Unknown') { break }
+                }
                 $category = ConvertTo-CategoryName ([string](Get-Prop $rec @('Category', 'SoftPaqCategory', 'Type')))
                 $item = if ($existing) { $existing } else {
                     [pscustomobject]@{

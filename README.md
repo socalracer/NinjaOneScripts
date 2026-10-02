@@ -371,13 +371,22 @@ The reference scripts were treated as examples, not as known-good code. These ar
 - **Reports outcomes and sets exit codes.** The reference lists recommendations but does not report success or failure, reboot state, or a meaningful exit code.
 - **Paths.** Files go under `C:\ProgramData\Peak Networks\…` rather than `C:\temp`, which standard users can write to.
 
-### Compared with the larger NinjaOne-oriented reference script
-That script was not included in the brief (it showed only a "Pasted markdown" placeholder), so this implementation follows the brief's stated goals:
-- No PowerShellGet/PackageManagement upgrade and no NuGet bootstrap on every run.
-  - The default `Auto` mode makes no PowerShell module changes.
-  - `CMSL` mode installs only what is missing.
-- PSGallery trust is never changed, and execution policy is not modified anywhere.
-- One optional custom field (`hpUpdateStatus`) instead of seven. It is written only if `Ninja-Property-Set` exists.
+### Compared with the larger NinjaOne-oriented reference script (Arjen Fiechter, v0.2 pre-production)
+
+**Adopted from it:**
+- **Report field names.** It reads `Severity` from HPIA's JSON, with values such as `RELEASE_TYPE_CRITICAL` and `RECOMMENDED`, plus `Comments` (e.g. `HP_UPDATE_RECOMMENDED`). It reads `SoftPaqNumber` from the XML. The parser here now checks those fields first.
+- **CMSL parameter names.** It confirms the `Install-HPImageAssistant -Extract -DestinationPath -Quiet` parameters this script uses.
+- **HPIA version string.** It confirms that HPIA's `ProductVersion` can carry a `+build` suffix; the version comparison here only uses major.minor.build.
+
+**Deliberately not adopted:**
+- **Prerequisite churn on every run.** Every run it installs or upgrades the NuGet provider, PackageManagement and PowerShellGet. It also sets PSGallery to *Trusted* machine-wide and upgrades HPCMSL. That is exactly the endpoint churn the brief asks to avoid. Here, the default `Auto` mode makes no module changes at all.
+- **Seven custom fields.** It writes seven fields, including a WYSIWYG HTML table, with `Ninja-Property-Set` calls that are not guarded, so it fails outside NinjaOne. Here there is one optional field, written only if the command exists.
+- **Waits with no timeout.** It runs `while (Get-Process HPImageAssistant) { Start-Sleep 5 }` after every HPIA call. That loop has no limit and also waits on any unrelated HPIA instance. `$LASTEXITCODE` is read after that loop, so the exit code it acts on is not reliably HPIA's. Here every HPIA run has a hard timeout and its exit code is captured from the process itself.
+- **Exclusions through `/ReferenceFile`.** It deletes excluded `<Recommendation>` nodes from HPIA's *analysis report* and passes that file back as `/ReferenceFile`. An HPIA reference file is HP's platform catalog, a different format from the analysis report. HPIA will likely reject the edited report or ignore the removed nodes. Because the script never checks HPIA's exit code or what was actually installed, the exclusion can fail silently. Here the approved list is verified before install, and the results are checked against it afterwards.
+- **Installs too broadly.** Its install modes use `/Category:All` or `Drivers,Software,Accessories` with `/Selection:All`. That installs Optional/Routine updates and HP Software-category apps. Here only Critical and Recommended BIOS, driver and firmware updates are installed.
+- **Report-folder mix-ups.** It reads `*.json` and `*.xml` from a reports folder shared by every run. If an older report is still there it can parse the wrong file, and with several files `Get-Content` receives an array of paths. Here every HPIA run gets its own fresh report folder.
+- **Weak HP check.** It tests `Win32_BIOS.Manufacturer -like '*HP*'`, which also matches HPE servers. Here the system manufacturer is matched exactly to HP or Hewlett-Packard.
+- **Misleading results.** It reports the number of updates *found* as the number installed. It writes "Reboot required to complete a previous operation" after its own installs. It exits 0 when no mode is selected. Here each SoftPaq's own result is reported, and exit codes follow the table above.
 
 ### Other choices
 - **`Write-Output` for NinjaOne visibility.** Functions that print status return no data, so that output is never captured by mistake.
@@ -390,7 +399,12 @@ That script was not included in the brief (it showed only a "Pasted markdown" pl
 
 These depend on HP behavior that could not be run against real hardware while building the scripts. The scripts are written to fail safe if any of them differ.
 
-1. **HPIA JSON report field names.** The script reads `SoftPaqId`, `Name`, `RecommendationValue` and `Remediation.ReturnCode`, with fallbacks to the XML report. If the field names differ:
+1. **HPIA JSON report field names.** The script reads these fields:
+   - `SoftPaqId`, `Name` and `Remediation.ReturnCode`.
+   - For the release type: `Severity`, then `RecommendationValue`, then `HP_*` codes in `Comments`.
+   - XML fallbacks: `Solution/Softpaq/Id` or `SoftPaqNumber`.
+
+   If HPIA's real output differs:
    - It runs per-selection scans to classify updates.
    - It logs `Skipped (HPIA did not classify…)` rather than guessing.
 2. **`/SPList` with `/Action:Install`.** This is verified at runtime. If HPIA ignores the list, the script switches to per-group installs.
