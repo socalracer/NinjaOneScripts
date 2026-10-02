@@ -111,7 +111,7 @@ A protected-name filter refuses anything matching these, even if someone later a
 | HP Connection Optimizer (InstallShield) | `setup.exe /s /f1"<generated .iss>"` (response file) |
 | Vendor `QuietUninstallString` | used as provided, with quoted paths parsed correctly |
 | Inno Setup (`unins000.exe`) | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
-| `.cmd`/`.bat` uninstall script | run through `cmd.exe /c` |
+| `.cmd`/`.bat` uninstall script, bare or already wrapped as `CMD /C "…\script.cmd"` (e.g. HP Documentation) | run through `cmd.exe /c` |
 | EXE whose uninstall string already has a silent switch | used as provided |
 | **Any other EXE** | **not run.** It is logged as failed ("no known silent uninstall method") so we never start an interactive uninstaller as SYSTEM. |
 

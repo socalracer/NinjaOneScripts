@@ -373,6 +373,16 @@ function Get-UninstallPlan {
         }
     }
 
+    # 5b. Same, when the vendor already wrapped the script in cmd, e.g. HP Documentation:
+    #     CMD /C "C:\Program Files\HP\Documentation\Doc_Uninstall.cmd"
+    if ($leaf -match '(?i)^cmd(\.exe)?$' -and $split.Arguments -match '(?i)^/c\s+"?[^"]+\.(cmd|bat)"?\s*$') {
+        return [pscustomobject]@{
+            Method    = 'Uninstall script'
+            FilePath  = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            Arguments = $split.Arguments
+        }
+    }
+
     # 6. Uninstall strings that already carry a silent switch.
     if ($split.Arguments -match '(?i)(^|\s)(/s|/silent|/quiet|/qn|-silent|-s|/verysilent|--silent|--quiet)(\s|$)') {
         return [pscustomobject]@{ Method = 'EXE (silent switch present)'; FilePath = $split.FilePath; Arguments = $split.Arguments }
