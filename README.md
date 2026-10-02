@@ -29,28 +29,46 @@ Other scripts in this repository (`Check-NPPIoC.ps1`, `EntraConnect-Install.ps1`
 
 1. **Administration → Library → Automation → Add → New Script**, language **PowerShell**, OS **Windows**, architecture **All**, **Run As: System**.
 2. Paste the script contents.
-3. Add **Script Variables** if you want technicians to pick options at run time. The script reads them as environment variables, so they work without command-line parameters. An explicit parameter always wins over a variable.
+3. Add the **Script Variables** below. **This is how options are chosen in NinjaOne.** We don't pass command-line parameters from NinjaOne, so "run with `-ScanOnly`" means *tick the Scan Only checkbox*.
+   - NinjaOne turns each variable's display name into a camelCase environment variable, e.g. "Scan Only" → `scanOnly`. Check that the calculated name NinjaOne shows matches the table. Case doesn't matter; spelling does.
+   - A variable left blank, or not created at all, uses the script default.
+   - The command-line parameters still work for manual runs on a machine. An explicitly passed parameter wins over a variable.
 
 **Peak-HP-Debloat.ps1 variables**
 
-| Variable name | Type | Maps to |
-|---|---|---|
-| `removePolyLens` | Checkbox | `-RemovePolyLens` |
-| `previewOnly` | Checkbox | `-WhatIf` (preview) |
-| `keepApps` | String | `-KeepApps` |
+| Display name | Type | Environment variable | Same as |
+|---|---|---|---|
+| Preview Only | Checkbox | `previewOnly` | `-WhatIf`: list what would be removed, change nothing |
+| Remove Poly Lens | Checkbox | `removePolyLens` | `-RemovePolyLens` |
+| Keep Apps | Text | `keepApps` | `-KeepApps` |
 
 **Peak-HP-Update.ps1 variables**
 
-| Variable name | Type | Maps to |
+| Display name | Type | Environment variable | Same as |
+|---|---|---|---|
+| Scan Only | Checkbox | `scanOnly` | `-ScanOnly` |
+| Include Optional | Checkbox | `includeOptional` | `-IncludeOptional` |
+| Exclude BIOS | Checkbox | `excludeBIOS` | `-ExcludeBIOS` |
+| Exclude Firmware | Checkbox | `excludeFirmware` | `-ExcludeFirmware` |
+| Excluded SoftPaq IDs | Text | `excludedSoftPaqIDs` | `-ExcludedSoftPaqIDs` |
+| Working Directory | Text | `workingDirectory` | `-WorkingDirectory` |
+| HPIA Source | Drop-down: Auto, CMSL, Direct | `hpiaSource` | `-HPIASource` |
+| Timeout Minutes | Integer | `timeoutMinutes` | `-TimeoutMinutes` |
+| Status Field | Text | `statusField` | `-StatusField` |
+
+**Common runs in NinjaOne**
+
+| Goal | Script | Variables |
 |---|---|---|
-| `scanOnly` | Checkbox | `-ScanOnly` |
-| `includeOptional` | Checkbox | `-IncludeOptional` |
-| `excludeBIOS` | Checkbox | `-ExcludeBIOS` |
-| `excludeFirmware` | Checkbox | `-ExcludeFirmware` |
-| `excludedSoftPaqIDs` | String | `-ExcludedSoftPaqIDs` |
-| `workingDirectory` | String | `-WorkingDirectory` |
-| `hpiaSource` | Drop-down (Auto/CMSL/Direct) | `-HPIASource` |
-| `timeoutMinutes` | Integer | `-TimeoutMinutes` |
+| Preview HP cleanup | Peak-HP-Debloat | Preview Only ✔ |
+| Standard HP cleanup | Peak-HP-Debloat | none |
+| Cleanup including Poly Lens | Peak-HP-Debloat | Remove Poly Lens ✔ |
+| Scan HP updates without installing | Peak-HP-Update | Scan Only ✔ |
+| Standard update | Peak-HP-Update | none |
+| Drivers and firmware but no BIOS | Peak-HP-Update | Exclude BIOS ✔ |
+| Include optional updates | Peak-HP-Update | Include Optional ✔ |
+
+To run one ad hoc, open the device, choose **Run Script**, pick the script, set the variables, and choose Run As **System**. For scheduled tasks and policies, set the variable values on the task. For example, use one weekly task with *Scan Only* ticked for reporting, and one maintenance-window task with it unticked.
 
 4. **Optional custom field.** To show update status on the device, create a device custom field:
    - Type: Text
@@ -284,6 +302,13 @@ Log lines have the form `yyyy-MM-dd HH:mm:ss [INFO|WARNING|ERROR] message`. The 
 ## How to test safely
 
 Test on a **freshly provisioned HP machine** first, ideally one model per hardware generation we support.
+
+To test outside NinjaOne exactly as NinjaOne runs a script (variables only, no parameters, 64-bit), use the helper from an elevated prompt:
+
+```powershell
+.\.claude\skills\ninjaone-scripts\scripts\Invoke-AsNinja.ps1 -ScriptPath .\Peak-HP-Update.ps1 -Variables @{ scanOnly = 'true' }
+.\.claude\skills\ninjaone-scripts\scripts\Invoke-AsNinja.ps1 -ScriptPath .\Peak-HP-Debloat.ps1 -Variables @{ previewOnly = 'true' }
+```
 
 ### Debloat checklist
 - [ ] Run `.\Peak-HP-Debloat.ps1 -WhatIf`.

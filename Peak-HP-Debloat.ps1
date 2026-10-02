@@ -172,7 +172,10 @@ function Get-EnvSetting {
     param([string]$Name)
     $value = [Environment]::GetEnvironmentVariable($Name)
     if ([string]::IsNullOrWhiteSpace($value)) { return $null }
-    return $value.Trim()
+    $value = $value.Trim()
+    # An empty NinjaOne text/drop-down variable can arrive as the literal string "null".
+    if ($value -eq 'null') { return $null }
+    return $value
 }
 
 function ConvertTo-Bool {
