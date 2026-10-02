@@ -129,7 +129,7 @@ A protected-name filter refuses anything matching these, even if someone later a
 | HP Connection Optimizer (InstallShield) | `setup.exe /s /f1"<generated .iss>"` (response file) |
 | Vendor `QuietUninstallString` | used as provided, with quoted paths parsed correctly |
 | Inno Setup (`unins000.exe`) | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
-| `.cmd`/`.bat` uninstall script, bare or already wrapped as `CMD /C "…\script.cmd"` (e.g. HP Documentation) | run through `cmd.exe /c` |
+| `.cmd`/`.bat` uninstall script, bare or already wrapped as `CMD /C "…\script.cmd"` (e.g. HP Documentation) | run through `cmd.exe /c` from a temp folder, output captured to a log. Success is judged by the Apps & Features entry disappearing, not the exit code, because a script that deletes its own folder exits 1. |
 | EXE whose uninstall string already has a silent switch | used as provided |
 | **Any other EXE** | **not run.** It is logged as failed ("no known silent uninstall method") so we never start an interactive uninstaller as SYSTEM. |
 
@@ -159,10 +159,10 @@ Every uninstaller has a timeout (default 15 minutes) and is killed if it hangs. 
 | Code | Meaning |
 |---|---|
 | 0 | Success, partial success, nothing to remove, preview, or non-HP device skipped |
-| 1 | Cleanup fundamentally failed: every attempted removal failed, or an unhandled error occurred |
+| 1 | Cleanup fundamentally failed: two or more removals were attempted and none succeeded, or an unhandled error occurred |
 | 2 | Prerequisite problem: not elevated, or installed software could not be enumerated |
 
-Individual optional removals that fail do **not** fail the script. They appear under `Failed:` in the summary and the result is `Partial success`.
+Individual optional removals that fail do **not** fail the script, even if that one app was the only thing left to remove. They appear under `Failed:` in the summary and the result is `Partial success`.
 
 ---
 
@@ -292,7 +292,7 @@ Result: Success
 | What | Where | Retention |
 |---|---|---|
 | Debloat log | `C:\ProgramData\Peak Networks\Logs\HP-Debloat-yyyyMMdd-HHmmss.log` | 30 days |
-| Failed MSI uninstall verbose log | `C:\ProgramData\Peak Networks\Logs\HP-Debloat-MSI-<app>-<timestamp>.log` (kept only on failure) | manual |
+| Failed uninstall log (MSI verbose log, or uninstall-script output) | `C:\ProgramData\Peak Networks\Logs\HP-Debloat-Uninstall-<app>-<timestamp>.log` (kept only on failure) | manual |
 | Update log | `C:\ProgramData\Peak Networks\Logs\HP-Update-yyyyMMdd-HHmmss.log` | 30 days |
 | HPIA reports (JSON/XML/HTML per HPIA run) | `C:\ProgramData\Peak Networks\HPIA\Reports\<timestamp>\<step>\` | 30 days |
 | HPIA binaries | `C:\ProgramData\Peak Networks\HPIA\bin\` | replaced when HP releases a newer HPIA |

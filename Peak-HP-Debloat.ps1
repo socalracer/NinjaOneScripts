@@ -53,7 +53,7 @@
 
     Exit codes:
         0 = success, partial success, nothing to remove, or non-HP device (skipped)
-        1 = cleanup fundamentally failed (every attempted removal failed, or a fatal error)
+        1 = cleanup fundamentally failed (2+ removals attempted and none succeeded, or a fatal error)
         2 = prerequisite problem (not elevated, cannot read installed software)
 
     Logs: C:\ProgramData\Peak Networks\Logs\HP-Debloat-yyyyMMdd-HHmmss.log (30 days retained)
@@ -318,7 +318,7 @@ function Get-UninstallPlan {
         Decides HOW to uninstall a Win32 app. Returns $null if there is no known silent method,
         so we never launch an interactive uninstaller as SYSTEM.
     #>
-    param($App, [string]$TempDirectory, [string]$MsiLogPath)
+    param($App, [string]$TempDirectory, [string]$LogPath)
 
     $productCode = Get-MsiProductCode -App $App
     $uninst      = [string]$App.UninstallString
@@ -329,7 +329,7 @@ function Get-UninstallPlan {
         return [pscustomobject]@{
             Method    = 'MSI'
             FilePath  = Join-Path $env:SystemRoot 'System32\msiexec.exe'
-            Arguments = ('/x {0} /qn /norestart REBOOT=ReallySuppress /l*v "{1}"' -f $productCode, $MsiLogPath)
+            Arguments = ('/x {0} /qn /norestart REBOOT=ReallySuppress /l*v "{1}"' -f $productCode, $LogPath)
         }
     }
 
@@ -367,22 +367,23 @@ function Get-UninstallPlan {
         }
     }
 
-    # 5. Uninstall scripts (e.g. HP Documentation's Doc_Uninstall.cmd) take no UI switches.
+    # 5. Uninstall scripts (e.g. HP Documentation's Doc_Uninstall.cmd) take no UI switches. Accept the
+    #    script bare, or already wrapped by the vendor: CMD /C "C:\Program Files\HP\Documentation\Doc_Uninstall.cmd"
+    #    Output is captured to a log because scripts give no other diagnostics.
+    $scriptPath = $null; $scriptArgs = ''
     if ($leaf -match '(?i)\.(cmd|bat)$') {
-        return [pscustomobject]@{
-            Method    = 'Uninstall script'
-            FilePath  = Join-Path $env:SystemRoot 'System32\cmd.exe'
-            Arguments = ('/c "{0}"' -f $(if ($split.Arguments) { '"{0}" {1}' -f $split.FilePath, $split.Arguments } else { '"{0}"' -f $split.FilePath }))
-        }
+        $scriptPath = $split.FilePath; $scriptArgs = $split.Arguments
+    } elseif ($leaf -match '(?i)^cmd(\.exe)?$') {
+        $m = [regex]::Match($split.Arguments, '(?i)^/c\s+"?(?<s>[^"]+\.(cmd|bat))"?\s*$')
+        if ($m.Success) { $scriptPath = $m.Groups['s'].Value.Trim() }
     }
-
-    # 5b. Same, when the vendor already wrapped the script in cmd, e.g. HP Documentation:
-    #     CMD /C "C:\Program Files\HP\Documentation\Doc_Uninstall.cmd"
-    if ($leaf -match '(?i)^cmd(\.exe)?$' -and $split.Arguments -match '(?i)^/c\s+"?[^"]+\.(cmd|bat)"?\s*$') {
+    if ($scriptPath) {
+        $inner = ('"{0}" {1}' -f $scriptPath, $scriptArgs).Trim()
         return [pscustomobject]@{
-            Method    = 'Uninstall script'
-            FilePath  = Join-Path $env:SystemRoot 'System32\cmd.exe'
-            Arguments = $split.Arguments
+            Method     = 'Uninstall script'
+            FilePath   = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            Arguments  = ('/c "{0} > "{1}" 2>&1"' -f $inner, $LogPath)
+            ScriptPath = $scriptPath
         }
     }
 
@@ -397,9 +398,10 @@ function Get-UninstallPlan {
 
 function Invoke-ProcessWithTimeout {
     <# Runs a process hidden with a hard timeout. Kills the process tree on timeout. #>
-    param([string]$FilePath, [string]$Arguments, [int]$TimeoutSeconds)
+    param([string]$FilePath, [string]$Arguments, [int]$TimeoutSeconds, [string]$WorkingDirectory)
     $startArgs = @{ FilePath = $FilePath; PassThru = $true; WindowStyle = 'Hidden'; ErrorAction = 'Stop' }
     if (-not [string]::IsNullOrWhiteSpace($Arguments)) { $startArgs.ArgumentList = $Arguments }
+    if ($WorkingDirectory) { $startArgs.WorkingDirectory = $WorkingDirectory }
     $proc = Start-Process @startArgs
     $null = $proc.Handle   # Caches the handle so ExitCode is available in Windows PowerShell 5.1.
     if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
@@ -527,8 +529,8 @@ function Invoke-Main {
                     $stats.Found++
                     Write-PeakLog ("[Win32] FOUND: {0} {1} (Publisher: {2})" -f $app.DisplayName, $app.DisplayVersion, $app.Publisher)
 
-                    $msiLog = Join-Path $LogDirectory ('HP-Debloat-MSI-{0}-{1}.log' -f ($app.DisplayName -replace '[^\w]', ''), (Get-Date -Format 'yyyyMMdd-HHmmss'))
-                    $plan = Get-UninstallPlan -App $app -TempDirectory $tempDir -MsiLogPath $msiLog
+                    $toolLog = Join-Path $LogDirectory ('HP-Debloat-Uninstall-{0}-{1}.log' -f ($app.DisplayName -replace '[^\w]', ''), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                    $plan = Get-UninstallPlan -App $app -TempDirectory $tempDir -LogPath $toolLog
                     if (-not $plan) {
                         Write-PeakLog ("[Win32] FAILED: {0} - no known silent uninstall method (UninstallString: {1}). Not attempted to avoid an interactive prompt." -f $app.DisplayName, $app.UninstallString) -Level WARNING
                         $stats.Failed++; $failedItems.Add($app.DisplayName)
@@ -542,7 +544,8 @@ function Invoke-Main {
                     }
 
                     try {
-                        $result = Invoke-ProcessWithTimeout -FilePath $plan.FilePath -Arguments $plan.Arguments -TimeoutSeconds ($UninstallTimeoutMinutes * 60)
+                        # Run from the temp folder so a script that deletes its own install folder is not blocked by it.
+                        $result = Invoke-ProcessWithTimeout -FilePath $plan.FilePath -Arguments $plan.Arguments -TimeoutSeconds ($UninstallTimeoutMinutes * 60) -WorkingDirectory $tempDir
                     } catch {
                         Write-PeakLog ("[Win32] FAILED: {0} - could not start uninstaller: {1}" -f $app.DisplayName, $_.Exception.Message) -Level WARNING
                         $stats.Failed++; $failedItems.Add($app.DisplayName)
@@ -566,18 +569,30 @@ function Invoke-Main {
                     # Confirm the uninstall entry is actually gone (EXE uninstallers sometimes exit 0 without removing).
                     Start-Sleep -Seconds 2
                     $stillThere = Test-Path -LiteralPath ('Registry::' + $app.RegistryPath)
+
+                    # Uninstall scripts often delete their own folder, including the running .cmd, and then end with
+                    # "The batch file cannot be found" (exit 1). For scripts, judge by the result, not the exit code.
+                    if ($plan.Method -eq 'Uninstall script' -and $code -ne 0) {
+                        $scriptGone = -not (Test-Path -LiteralPath $plan.ScriptPath)
+                        if (-not $stillThere) {
+                            Write-PeakLog ("[Win32] {0}: uninstall script exited {1} but the app is unregistered - treating as removed." -f $app.DisplayName, $code) -LogOnly
+                            $ok = $true
+                        } elseif ($scriptGone) {
+                            Write-PeakLog ("[Win32] {0}: uninstall script removed its files (exit {1}) but left its Apps & Features entry behind." -f $app.DisplayName, $code) -Level WARNING
+                        }
+                    }
                     if ($ok -and -not $stillThere) {
                         $msg = "[Win32] REMOVED: $($app.DisplayName) (exit $code)"
                         if ($code -in 3010, 1641) { $msg += ' - reboot required' }
                         Write-PeakLog $msg
                         $stats.Removed++; $removedItems.Add($app.DisplayName)
-                        if ($plan.Method -eq 'MSI' -and (Test-Path -LiteralPath $msiLog)) { Remove-Item -LiteralPath $msiLog -Force -WhatIf:$false -ErrorAction SilentlyContinue }
+                        if (Test-Path -LiteralPath $toolLog) { Remove-Item -LiteralPath $toolLog -Force -WhatIf:$false -ErrorAction SilentlyContinue }
                     } elseif ($ok -and $stillThere -and $code -in 3010, 1641) {
                         Write-PeakLog "[Win32] REMOVED (pending reboot): $($app.DisplayName) (exit $code)"
                         $stats.Removed++; $removedItems.Add($app.DisplayName); $stats.RebootRequired = $true
                     } else {
                         $why = if ($ok) { 'uninstaller reported success but the entry is still registered' } else { "exit code $code" }
-                        $extra = if ($plan.Method -eq 'MSI') { " (MSI log: $msiLog)" } else { '' }
+                        $extra = if (Test-Path -LiteralPath $toolLog) { " (log: $toolLog)" } else { '' }
                         Write-PeakLog ("[Win32] FAILED: {0} - {1}{2}" -f $app.DisplayName, $why, $extra) -Level WARNING
                         $stats.Failed++; $failedItems.Add($app.DisplayName)
                     }
@@ -662,7 +677,9 @@ function Invoke-Main {
 
         #------------------------------------------------------------ Summary
         $attempted = $stats.Removed + $stats.Failed
-        if (-not $Preview -and $attempted -gt 0 -and $stats.Removed -eq 0) { $script:ExitCode = 1 }
+        # One optional app failing is not a failed cleanup. Fail only when several removals were attempted
+        # and none worked (e.g. Windows Installer broken, policy blocking uninstalls).
+        if (-not $Preview -and $attempted -ge 2 -and $stats.Removed -eq 0) { $script:ExitCode = 1 }
 
         Write-Output ''
         Write-Output '--- Summary ---'
