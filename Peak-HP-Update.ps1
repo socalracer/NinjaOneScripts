@@ -44,7 +44,8 @@
     HPIA binaries, reports and temporary downloads. Default: C:\ProgramData\Peak Networks\HPIA
 
 .PARAMETER HPIASource
-    Auto   (default) use HP CMSL if it is already installed, otherwise HP's published download.
+    Auto   (default) use HP CMSL if it is already installed, otherwise HP's published download; if
+           that fails too, install the HPCMSL module and use it.
     CMSL   install the HPCMSL module if needed and use Install-HPImageAssistant (falls back to Direct).
     Direct use HP's published HPIA download only (no PowerShell module changes).
 
@@ -493,15 +494,47 @@ function Get-HpiaLatestRelease {
     }
     if (-not (Test-Path -LiteralPath $cab)) { throw "Unable to download the HPIA manifest: $lastError" }
 
-    New-Item -Path $extractDir -ItemType Directory -Force | Out-Null
-    $expand = Join-Path $env:SystemRoot 'System32\expand.exe'
-    & $expand $cab '-F:*' $extractDir 2>&1 | Out-Null
-    $xmlFile = Get-ChildItem -LiteralPath $extractDir -Filter '*.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $xmlFile) { throw 'The HPIA manifest could not be extracted.' }
+    # A proxy or captive portal can return an HTML page with HTTP 200 - check for the CAB signature.
+    $size = (Get-Item -LiteralPath $cab).Length
+    $head = ''
+    try {
+        $fs = [IO.File]::OpenRead($cab)
+        try { $buf = New-Object byte[] 4; $n = $fs.Read($buf, 0, 4); $head = [Text.Encoding]::ASCII.GetString($buf, 0, $n) } finally { $fs.Dispose() }
+    } catch { }
+    if ($head -ne 'MSCF') {
+        throw ("The downloaded HPIA manifest is not a CAB file ({0} bytes, starts with '{1}'). A proxy or web filter may be blocking hpia.hpcloud.hp.com." -f $size, ($head -replace '[^\x20-\x7E]', '.'))
+    }
 
-    $doc = New-Object System.Xml.XmlDocument
-    $doc.Load($xmlFile.FullName)
-    $latest  = $doc.SelectSingleNode("//*[local-name()='HPIALatest']")
+    # Extract with expand.exe; fall back to extrac32.exe. The XML file name inside the CAB is not
+    # assumed - every extracted file is tried.
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -Path $extractDir -ItemType Directory -Force | Out-Null
+    $toolOutput = ''
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # native-tool stderr must not become a terminating error
+    try {
+        $toolOutput = (& (Join-Path $env:SystemRoot 'System32\expand.exe') $cab '-F:*' $extractDir 2>&1 | Out-String).Trim()
+        if (-not (Get-ChildItem -LiteralPath $extractDir -Recurse -File -ErrorAction SilentlyContinue)) {
+            $toolOutput += ' | extrac32: ' + (& (Join-Path $env:SystemRoot 'System32\extrac32.exe') /Y /E /L $extractDir $cab 2>&1 | Out-String).Trim()
+        }
+    } finally { $ErrorActionPreference = $eap }
+
+    $files = @(Get-ChildItem -LiteralPath $extractDir -Recurse -File -ErrorAction SilentlyContinue)
+    $latest = $null
+    $roots = @()
+    foreach ($f in $files) {
+        try {
+            $doc = New-Object System.Xml.XmlDocument
+            $doc.Load($f.FullName)
+            $roots += ('{0}<{1}>' -f $f.Name, $doc.DocumentElement.LocalName)
+            $latest = $doc.SelectSingleNode("//*[local-name()='HPIALatest']")
+            if ($latest) { break }
+        } catch { $roots += ('{0}(not XML)' -f $f.Name) }
+    }
+    if (-not $latest) {
+        $detail = if ($files.Count -eq 0) { "nothing was extracted; tool output: $toolOutput" } else { 'files: ' + ($roots -join ', ') }
+        throw ("The HPIA manifest ({0} bytes) did not yield HPIA release information - {1}" -f $size, $detail)
+    }
     $version = Get-XmlText $latest 'Version'
     $url     = Get-XmlText $latest 'SoftpaqURL'
     if (-not $version -or -not $url) { throw 'The HPIA manifest did not contain a version/URL.' }
@@ -539,6 +572,7 @@ function Install-HpiaWithCmsl {
         $im = @{ Name = 'HPCMSL'; Scope = 'AllUsers'; Force = $true; AllowClobber = $true; Repository = 'PSGallery'; ErrorAction = 'Stop' }
         if ((Get-Command Install-Module).Parameters.ContainsKey('AcceptLicense')) { $im.AcceptLicense = $true }
         Install-Module @im
+        Import-Module -Name 'HPCMSL' -Force -ErrorAction SilentlyContinue
         $cmd = Get-Command -Name 'Install-HPImageAssistant' -ErrorAction SilentlyContinue
     }
     if (-not $cmd) { throw 'Install-HPImageAssistant (HP CMSL) is not available.' }
@@ -605,12 +639,14 @@ function Initialize-Hpia {
         $ok = $false
         $source = $script:Settings.HPIASource
 
+        $cmslTried = $false
         if ($source -eq 'CMSL' -or ($source -eq 'Auto' -and (Get-Command -Name 'Install-HPImageAssistant' -ErrorAction SilentlyContinue))) {
+            $cmslTried = $true
             try {
                 Install-HpiaWithCmsl -Destination $staging -InstallModuleIfMissing ($source -eq 'CMSL')
                 $ok = $true
             } catch {
-                Write-PeakLog "HP CMSL method failed: $($_.Exception.Message). Falling back to HP's direct download." -Level WARNING
+                Write-PeakLog "HP CMSL method failed: $($_.Exception.Message). Trying HP's direct download." -Level WARNING
             }
         }
         if (-not $ok -and $release) {
@@ -619,6 +655,18 @@ function Initialize-Hpia {
                 $ok = $true
             } catch {
                 Write-PeakLog "Direct HPIA download failed: $($_.Exception.Message)" -Level WARNING
+            }
+        }
+
+        # Last resort in Auto mode: HP CMSL is HP's supported installer for HPIA. Install the module only
+        # now, when HPIA is missing/outdated and the manifest route did not work.
+        if (-not $ok -and $source -eq 'Auto' -and -not $cmslTried) {
+            Write-PeakLog 'Trying HP CMSL (installs the HPCMSL module if it is missing).'
+            try {
+                Install-HpiaWithCmsl -Destination $staging -InstallModuleIfMissing $true
+                $ok = $true
+            } catch {
+                Write-PeakLog "HP CMSL method failed: $($_.Exception.Message)" -Level WARNING
             }
         }
 
